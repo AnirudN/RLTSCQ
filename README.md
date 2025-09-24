@@ -1,6 +1,6 @@
 # Reinforcement Learning Based Traffic Signal Design to Minimize Queue Lengths
 
-This repository contains the code and experiments for our paper on designing traffic signal controllers using Reinforcement Learning (RL). The primary objective is to minimize vehicle queue lengths by evaluating various state representations, including those derived from autoencoders. The framework utilizes the [SUMO (Simulation of Urban MObility)](https://github.com/eclipse/sumo) traffic simulator.
+This repository contains the code and experiments for our paper on designing traffic signal controllers using Reinforcement Learning (RL).  The framework utilizes the [SUMO (Simulation of Urban MObility)](https://github.com/eclipse/sumo) traffic simulator.
 
 ## Project Structure
 
