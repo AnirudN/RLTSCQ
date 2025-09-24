@@ -64,8 +64,8 @@ This project contains a `requirements.txt` file with all the necessary Python pa
 First, clone the repository:
 
 ```bash
-git clone <repository URL >
-cd <REPO NAME >
+git clone https://github.com/AnirudN/RLTSCQ.git
+cd <RLTSCQ>
 ```
 
 It is highly recommended to use a virtual environment (like `conda` or `venv`) to manage dependencies.
