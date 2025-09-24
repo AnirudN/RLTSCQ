@@ -154,7 +154,7 @@ If you use this code in your research, please cite our paper:
 [Link to Paper](#) <!-- Replace with your actual paper link -->
 
 ```bibtex
-@inproceedings{your_last_name2025reinforcement,
+@inproceedings{RLTSCQ,
   title={Reinforcement Learning Based Traffic Signal Design to Minimize Queue Lengths},
   author={Anirud Nandakumar, Chayan Banerjee, Lelitha Devi Vanajakshi},
   year={2025},
