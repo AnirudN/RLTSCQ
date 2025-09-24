@@ -93,13 +93,13 @@ This project uses a PPO (Proximal Policy Optimization) agent for training and te
 
 Before running the experiments, you may need to configure the environment:
 
-- **State Representation (Observation Space)**: To change the observation class, navigate to `RLQ/sumo_rl/environment/env.py` and modify line 104.
+- **State Representation (Observation Space)**: To change the observation class, navigate to `RLTSCQ/sumo_rl/environment/env.py` and modify line 104.
 
-  **File**: `RLQ/sumo_rl/environment/env.py`
+  **File**: `RLTSCQ/sumo_rl/environment/env.py`
 
   **Line to change**: `observation_class: ObservationFunction = AutoTrainingProjector_Latent_16`
 
-  **Available Classes** (defined in `RLQ/sumo_rl/environment/observations.py`):
+  **Available Classes** (defined in `RLTSCQ/sumo_rl/environment/observations.py`):
   - `AutoTrainingProjector_Latent_4`
   - `AutoTrainingProjector_Latent_8`
   - `AutoTrainingProjector_Latent_16`
@@ -111,11 +111,11 @@ Before running the experiments, you may need to configure the environment:
 
 - **Autoencoder Training File Path**: If using an autoencoder-based state representation, you must set your desired save directory for the AE training files.
 
-  **File**: `RLQ/sumo_rl/environment/observations.py`
+  **File**: `RLTSCQ/sumo_rl/environment/observations.py`
 
   **Line to change**: `self.save_dir = "/seeding_results/autoencoder_dimension_comparison"` (around line 676). Please use an absolute path.
 
-- **Network and Route Files**: The environment definition in `RLQ/sumo_rl/environment/env.py` (lines 97-98) uses hardcoded paths for the SUMO network and traffic flows. Ensure these paths are correct for your setup.
+- **Network and Route Files**: The environment definition in `RLTSCQ/sumo_rl/environment/env.py` (lines 97-98) uses hardcoded paths for the SUMO network and traffic flows. Ensure these paths are correct for your setup.
 
   **Network File**: `nets/RLQ/caliberated_net.xml`
 
@@ -126,7 +126,7 @@ Before running the experiments, you may need to configure the environment:
 To train a PPO agent, run the `ppo_train.py` script from the root directory.
 
 ```bash
-python RLQ/experiments/ppo_train.py --outputdir <path_to_output_directory> --reward <reward_function>
+python RLTSCQ/experiments/ppo_train.py --outputdir <path_to_output_directory> --reward <reward_function>
 ```
 
 **Arguments**:
@@ -138,14 +138,14 @@ python RLQ/experiments/ppo_train.py --outputdir <path_to_output_directory> --rew
 After training, you can evaluate the agent's performance using the `ppo_test.py` script.
 
 ```bash
-python RLQ/experiments/ppo_test.py --outputdir <path_to_output_directory> --model_path <path_to_model.zip>
+python RLTSCQ/experiments/ppo_test.py --outputdir <path_to_output_directory> --model_path <path_to_model.zip>
 ```
 
 **Arguments**:
 - `--outputdir`: (Required) Path to the directory where test results (e.g., CSV files) will be saved.
 - `--model_path`: (Required) Path to the trained model file. This is typically found in your training output directory as `ppo_sumo_final_model.zip`.
 
-**Note**: The reward function for testing is set to `queue` by default. To change this, you can modify the `test_env` variable definition in `RLQ/experiments/ppo_test.py` (around line 136).
+**Note**: The reward function for testing is set to `queue` by default. To change this, you can modify the `test_env` variable definition in `RLTSCQ/experiments/ppo_test.py` (around line 136).
 
 ## Citing This Work
 
