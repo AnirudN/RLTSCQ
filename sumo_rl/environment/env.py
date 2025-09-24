@@ -21,9 +21,9 @@ from pettingzoo import AECEnv
 from pettingzoo.utils import agent_selector, wrappers
 from pettingzoo.utils.conversions import parallel_wrapper_fn
 
-from .observations import DefaultObservationFunction, ObservationFunction
+from .observations import  AutoTrainingFeatureProjector, ObservationFunction, KPlanesStateRepresentation, FullStateObservation, MyObservationWithDurationsDirectTraci
 from .traffic_signal import TrafficSignal
-
+from .observations import AutoTrainingProjector_Latent_4, AutoTrainingProjector_Latent_8, AutoTrainingProjector_Latent_16, AutoTrainingProjector_Latent_19, AutoTrainingProjector_Latent_32
 
 LIBSUMO = "LIBSUMO_AS_TRACI" in os.environ
 
@@ -94,14 +94,15 @@ class SumoEnvironment(gym.Env):
         waiting_time_memory: int = 1000,
         time_to_teleport: int = -1,
         delta_time: int = 5,
-        yellow_time: int = 2,
-        min_green: int = 5,
-        max_green: int = 50,
-        enforce_max_green: bool = False,
+        yellow_time: int = 5,
+        min_green: int = 10,
+        max_green: int = 40,
+        enforce_max_green: bool = True,
         single_agent: bool = False,
-        reward_fn: Union[str, Callable, dict, List] = "diff-waiting-time",
+        reward_fn: Union[str, Callable, dict, List] = "queue",
         reward_weights: Optional[List[float]] = None,
-        observation_class: ObservationFunction = DefaultObservationFunction,
+        observation_class: ObservationFunction = AutoTrainingProjector_Latent_16,
+        #observation_class: ObservationFunction = KPlanesStateRepresentation,
         add_system_info: bool = True,
         add_per_agent_info: bool = True,
         sumo_seed: Union[str, int] = "random",
@@ -124,7 +125,7 @@ class SumoEnvironment(gym.Env):
         else:
             self._sumo_binary = sumolib.checkBinary("sumo")
 
-        assert delta_time > yellow_time, "Time between actions must be at least greater than yellow time."
+        #assert delta_time > yellow_time, "Time between actions must be at least greater than yellow time."
         assert max_green > min_green, "Max green time must be greater than min green time."
 
         self.begin_time = begin_time
@@ -271,32 +272,32 @@ class SumoEnvironment(gym.Env):
         """Return current simulation second on SUMO."""
         return self.sumo.simulation.getTime()
 
-    def step(self, action: Union[dict, int]):
-        """Apply the action(s) and then step the simulation for delta_time seconds.
+    def step(self, action: Union[dict, Tuple[int, int]]):
+        """Apply the action(s) and step the simulation for delta_time seconds.
 
-        Args:
-            action (Union[dict, int]): action(s) to be applied to the environment.
-            If single_agent is True, action is an int, otherwise it expects a dict with keys corresponding to traffic signal ids.
+        A
         """
-        # No action, follow fixed TL defined in self.phases
-        if self.fixed_ts or action is None or action == {}:
+        # No action → Fixed Traffic Lights Mode
+        if self.fixed_ts or action is None or (isinstance(action, dict) and len(action) == 0):
             for _ in range(self.delta_time):
                 self._sumo_step()
+             
         else:
             self._apply_actions(action)
-            self._run_steps()
+            self._run_steps()  # Run simulation steps
+    
 
         observations = self._compute_observations()
         rewards = self._compute_rewards()
         dones = self._compute_dones()
-        terminated = False  # there are no 'terminal' states in this environment
-        truncated = dones["__all__"]  # episode ends when sim_step >= max_steps
+        truncated = dones["__all__"]  # Ends when sim_step >= max_steps
         info = self._compute_info()
 
         if self.single_agent:
-            return observations[self.ts_ids[0]], rewards[self.ts_ids[0]], terminated, truncated, info
+            return observations[self.ts_ids[0]], rewards[self.ts_ids[0]], False, truncated, info
         else:
             return observations, rewards, dones, info
+
 
     def _run_steps(self):
         time_to_act = False
@@ -308,19 +309,18 @@ class SumoEnvironment(gym.Env):
                     time_to_act = True
 
     def _apply_actions(self, actions):
-        """Set the next green phase for the traffic signals.
-
-        Args:
-            actions: If single-agent, actions is an int between 0 and self.num_green_phases (next green phase)
-                     If multiagent, actions is a dict {ts_id : greenPhase}
-        """
         if self.single_agent:
             if self.traffic_signals[self.ts_ids[0]].time_to_act:
-                self.traffic_signals[self.ts_ids[0]].set_next_phase(actions)
+                ####28 apr
+                ####selected_phase, green_extension = actions  # Unpack action tuple
+                green_extension = actions
+                #####self.traffic_signals[self.ts_ids[0]].set_next_phase(selected_phase, green_extension)
+                self.traffic_signals[self.ts_ids[0]].set_next_phase(green_extension)
         else:
-            for ts, action in actions.items():
+            for ts, (selected_phase, green_extension) in actions.items():
                 if self.traffic_signals[ts].time_to_act:
-                    self.traffic_signals[ts].set_next_phase(action)
+                    self.traffic_signals[ts].set_next_phase(selected_phase, green_extension)
+
 
     def _compute_dones(self):
         dones = {ts_id: False for ts_id in self.ts_ids}
@@ -411,19 +411,76 @@ class SumoEnvironment(gym.Env):
         speeds = [self.sumo.vehicle.getSpeed(vehicle) for vehicle in vehicles]
         waiting_times = [self.sumo.vehicle.getWaitingTime(vehicle) for vehicle in vehicles]
         num_backlogged_vehicles = len(self.sumo.simulation.getPendingVehicles())
+        lanes = self.sumo.lane.getIDList()
+        queue_lengths = {lane: self.sumo.lane.getLastStepHaltingNumber(lane) for lane in lanes}
+        
+        # Traffic light info
+        traffic_lights = self.sumo.trafficlight.getIDList()
+        signal_states = {}
+
+        for tl in traffic_lights:
+            logic = self.sumo.trafficlight.getAllProgramLogics(tl)
+            if logic:
+                active_program = logic[0]
+                cycle_time = sum(phase.duration for phase in active_program.phases)
+                signal_states[tl] = {
+                    "current_state": self.sumo.trafficlight.getRedYellowGreenState(tl),
+                    "phase_duration": self.sumo.trafficlight.getPhaseDuration(tl),
+                    "cycle_time": cycle_time,
+                    "phases": [
+                        {"state": phase.state, "duration": phase.duration}
+                        for phase in active_program.phases
+                    ],
+                }
+            else:
+                signal_states[tl] = {
+                    "current_state": self.sumo.trafficlight.getRedYellowGreenState(tl),
+                    "phase_duration": self.sumo.trafficlight.getPhaseDuration(tl),
+                    "cycle_time": None,
+                    "phases": [],
+                }
+
+        approaches = {
+            "north_0": ["n_t_0"],
+            "north_1": ["n_t_1"],
+            "south_0": ["s_t_0"],
+            "south_1": ["s_t_1"],
+            "east_0": ["e_t_0"],
+            "east_1": ["e_t_1"],
+            "west_0": ["w_t_0"],
+            "west_1": ["w_t_1"],
+        }
+
+        stopped_per_approach = {}
+        for approach, approach_lanes in approaches.items():
+            stopped_count = 0
+            for lane_id in approach_lanes:
+                if lane_id in lanes: 
+                    veh_ids = self.sumo.lane.getLastStepVehicleIDs(lane_id)
+                    for vid in veh_ids:
+                        if self.sumo.vehicle.getSpeed(vid) < 0.1:
+                            stopped_count += 1
+            stopped_per_approach[approach] = stopped_count
+
         return {
             "system_total_running": len(vehicles),
             "system_total_backlogged": num_backlogged_vehicles,
-            "system_total_stopped": sum(
-                int(speed < 0.1) for speed in speeds
-            ),  # In SUMO, a vehicle is considered halting if its speed is below 0.1 m/s
+            "system_total_stopped": sum(int(speed < 0.1) for speed in speeds),
             "system_total_arrived": self.num_arrived_vehicles,
             "system_total_departed": self.num_departed_vehicles,
             "system_total_teleported": self.num_teleported_vehicles,
             "system_total_waiting_time": sum(waiting_times),
             "system_mean_waiting_time": 0.0 if len(vehicles) == 0 else np.mean(waiting_times),
             "system_mean_speed": 0.0 if len(vehicles) == 0 else np.mean(speeds),
+            "queue_lengths": queue_lengths,
+            "traffic_lights": signal_states,
+            "stopped_per_approach": stopped_per_approach  
         }
+
+
+
+
+
 
     def _get_per_agent_info(self):
         stopped = [self.traffic_signals[ts].get_total_queued() for ts in self.ts_ids]
@@ -477,9 +534,6 @@ class SumoEnvironment(gym.Env):
     def save_csv(self, out_csv_name, episode):
         """Save metrics of the simulation to a .csv file.
 
-        Args:
-            out_csv_name (str): Path to the output .csv file. E.g.: "results/my_results
-            episode (int): Episode number to be appended to the output file name.
         """
         if out_csv_name is not None:
             df = pd.DataFrame(self.metrics)
@@ -583,35 +637,46 @@ class SumoEnvironmentPZ(AECEnv, EzPickle):
         self.env.save_csv(out_csv_name, episode)
 
     def step(self, action):
-        """Step the environment."""
-        if self.truncations[self.agent_selection] or self.terminations[self.agent_selection]:
-            return self._was_dead_step(action)
-        agent = self.agent_selection
-        if not self.action_spaces[agent].contains(action):
-            raise Exception(
-                "Action for agent {} must be in Discrete({})."
-                "It is currently {}".format(agent, self.action_spaces[agent].n, action)
-            )
+            """Step the environment with phase selection and green time control."""
+            
+            if self.truncations[self.agent_selection] or self.terminations[self.agent_selection]:
+                return self._was_dead_step(action)
 
-        if not self.env.fixed_ts:
-            self.env._apply_actions({agent: action})
+            agent = self.agent_selection
 
-        if self._agent_selector.is_last():
+            # Ensure action is in the MultiDiscrete space (e.g., selecting phase + green extension)
+            if not self.action_spaces[agent].contains(action):
+                raise Exception(
+                    "Action for agent {} must be in MultiDiscrete({})."
+                    " It is currently {}".format(agent, self.action_spaces[agent].nvec, action)
+                )
+
+            ######selected_phase, green_extension = action  # Unpack the action tuple
+            green_extension = action
+
             if not self.env.fixed_ts:
-                self.env._run_steps()
+                # Apply both phase selection and extended green time
+                ##### 
+                #self.env._apply_actions({agent: (selected_phase, green_extension)})
+                self.env._apply_actions({agent: (green_extension)})
+
+            if self._agent_selector.is_last():
+                if not self.env.fixed_ts:
+                    self.env._run_steps()  # Run the simulation steps
+                else:
+                    for _ in range(self.env.delta_time):
+                        self.env._sumo_step()
+
+                self.env._compute_observations()
+                self.rewards = self.env._compute_rewards()
+                self.compute_info()
             else:
-                for _ in range(self.env.delta_time):
-                    self.env._sumo_step()
+                self._clear_rewards()
 
-            self.env._compute_observations()
-            self.rewards = self.env._compute_rewards()
-            self.compute_info()
-        else:
-            self._clear_rewards()
+            done = self.env._compute_dones()["__all__"]
+            self.truncations = {a: done for a in self.agents}
 
-        done = self.env._compute_dones()["__all__"]
-        self.truncations = {a: done for a in self.agents}
+            self.agent_selection = self._agent_selector.next()
+            self._cumulative_rewards[agent] = 0
+            self._accumulate_rewards()
 
-        self.agent_selection = self._agent_selector.next()
-        self._cumulative_rewards[agent] = 0
-        self._accumulate_rewards()

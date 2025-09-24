@@ -3,8 +3,9 @@
 import os
 import sys
 from typing import Callable, List, Union
-
-
+import traci
+import math
+import time
 if "SUMO_HOME" in os.environ:
     tools = os.path.join(os.environ["SUMO_HOME"], "tools")
     sys.path.append(tools)
@@ -90,6 +91,27 @@ class TrafficSignal:
         self.reward_fn = reward_fn
         self.reward_weights = reward_weights
         self.sumo = sumo
+        self.green_extension = 0
+        self.enforce_max_green = True
+        enforce_max_green = True
+        self.phase_durations={}
+        self.last_sumo_phase_index = self.sumo.trafficlight.getPhase(self.id)
+        self.time_on_current_phase = 0
+        self.approach_lanes = self._initialize_approach_lanes()
+        # In your agent's __init__ method, add the following attributes:
+
+        # To store max queues from the previous timestep for the R_reduction calculation
+        self.last_max_queues = {}
+
+        # --- Reward function parameters ---
+        # Normalization factor for reward calculation, representing a 'very large' or 
+        # 'maximum possible' queue per approach. This helps keep reward values scaled.
+        # Adjust this value based on the maximum expected queue on any single approach.
+        self.max_queue_norm_factor =62 
+
+        # Weights for the different reward components (α1 and α2 from the formula)
+        self.alpha_reduction = 0.7  # Weight for the queue reduction component (α1)
+        self.alpha_absolute = 0.3   # Weight for the absolute queue penalty component (α2)
 
         if type(self.reward_fn) is list:
             self.reward_dim = len(self.reward_fn)
@@ -115,50 +137,36 @@ class TrafficSignal:
         self.lanes_length = {lane: self.sumo.lane.getLength(lane) for lane in self.lanes + self.out_lanes}
 
         self.observation_space = self.observation_fn.observation_space()
-        self.action_space = spaces.Discrete(self.num_green_phases)
+        #self.action_space = spaces.Discrete(self.num_green_phases)
+        ###edit 29 apr
+        #######self.action_space = spaces.MultiDiscrete([self.num_green_phases, self.max_green])
+        self.action_space = spaces.Discrete(self.max_green)
 
     def _get_reward_fn_from_string(self, reward_fn):
         if type(reward_fn) is str:
             if reward_fn in TrafficSignal.reward_fns.keys():
+  
+                #print(TrafficSignal.reward_fns.keys())
                 return TrafficSignal.reward_fns[reward_fn]
             else:
                 raise NotImplementedError(f"Reward function {reward_fn} not implemented")
         return reward_fn
 
     def _build_phases(self):
-        phases = self.sumo.trafficlight.getAllProgramLogics(self.id)[0].phases
-        if self.env.fixed_ts:
-            self.num_green_phases = len(phases) // 2  # Number of green phases == number of phases (green+yellow) divided by 2
-            return
+        logic = self.sumo.trafficlight.getAllProgramLogics(self.id)[0]
 
-        self.green_phases = []
-        self.yellow_dict = {}
-        for phase in phases:
-            state = phase.state
-            if "y" not in state and (state.count("r") + state.count("s") != len(state)):
-                self.green_phases.append(self.sumo.trafficlight.Phase(60, state))
-        self.num_green_phases = len(self.green_phases)
-        self.all_phases = self.green_phases.copy()
-
-        for i, p1 in enumerate(self.green_phases):
-            for j, p2 in enumerate(self.green_phases):
-                if i == j:
-                    continue
-                yellow_state = ""
-                for s in range(len(p1.state)):
-                    if (p1.state[s] == "G" or p1.state[s] == "g") and (p2.state[s] == "r" or p2.state[s] == "s"):
-                        yellow_state += "y"
-                    else:
-                        yellow_state += p1.state[s]
-                self.yellow_dict[(i, j)] = len(self.all_phases)
-                self.all_phases.append(self.sumo.trafficlight.Phase(self.yellow_time, yellow_state))
-
-        programs = self.sumo.trafficlight.getAllProgramLogics(self.id)
-        logic = programs[0]
-        logic.type = 0
-        logic.phases = self.all_phases
+        # SUMO will follow this exact sequence
         self.sumo.trafficlight.setProgramLogic(self.id, logic)
-        self.sumo.trafficlight.setRedYellowGreenState(self.id, self.all_phases[0].state)
+
+        # Define green phase indices manually based on your tlLogic:
+        self.green_phase_indices = [0, 2, 4, 6]  # E/W straight-left, E/W right, N/S straight-left, N/S right
+        self.num_green_phases = len(self.green_phase_indices)
+
+        # Store durations if you want to modify them later
+        self.green_durations = [logic.phases[i].duration for i in self.green_phase_indices]
+
+        # Optional: store all phases for inspection
+        self.all_phases = logic.phases
 
     @property
     def time_to_act(self):
@@ -166,42 +174,195 @@ class TrafficSignal:
         return self.next_action_time == self.env.sim_step
 
     def update(self):
-        """Updates the traffic signal state.
+        try:
+            current_sumo_phase_idx = self.sumo.trafficlight.getPhase(self.id)
 
-        If the traffic signal should act, it will set the next green phase and update the next action time.
-        """
-        self.time_since_last_phase_change += 1
-        if self.is_yellow and self.time_since_last_phase_change == self.yellow_time:
-            # self.sumo.trafficlight.setPhase(self.id, self.green_phase)
-            self.sumo.trafficlight.setRedYellowGreenState(self.id, self.all_phases[self.green_phase].state)
-            self.is_yellow = False
+            if current_sumo_phase_idx != self.last_sumo_phase_index:
+                self.time_on_current_phase = 0
+                self.last_sumo_phase_index = current_sumo_phase_idx
+            else:
 
-    def set_next_phase(self, new_phase: int):
-        """Sets what will be the next green phase and sets yellow phase if the next phase is different than the current.
+                self.time_on_current_phase += 1
 
-        Args:
-            new_phase (int): Number between [0 ... num_green_phases]
-        """
-        new_phase = int(new_phase)
+        except traci.TraCIException as e:
+             if "connection closed" not in str(e).lower():
+                  print(f"Warning: TraCI Error during TS {self.id} update: {e}")
+             self.last_sumo_phase_index = -1 # Force re-check next time
+             self.time_on_current_phase = 0
+    
 
-        # Ensure max green time is enforced if needed
-        if self.enforce_max_green and new_phase == self.green_phase and self.time_since_last_phase_change >= self.max_green:
-            new_phase = (self.green_phase + 1) % self.num_green_phases  # Next phase is activated
+    def set_next_phase(self, green_extension: int = 0):
+        new_phase =self.sumo.trafficlight.getPhase(self.id)
+        #print(f"\n--- set_next_phase called at sim_step {self.env.sim_step} ---")
+        ##print(f"  Target Env Phase Index: {new_phase}, Raw Green Extension Input: {green_extension}")
+        #print(f"  Min/Max Green Constraints: [{self.min_green}, {self.max_green}]")
 
-        if self.green_phase == new_phase or self.time_since_last_phase_change < self.yellow_time + self.min_green:
-            # self.sumo.trafficlight.setPhase(self.id, self.green_phase)
-            self.sumo.trafficlight.setRedYellowGreenState(self.id, self.all_phases[self.green_phase].state)
+        new_phase_idx_env =self.sumo.trafficlight.getPhase(self.id)
+        #print(new_phase)
+        if new_phase % 2!=0:
             self.next_action_time = self.env.sim_step + self.delta_time
-        else:
-            # self.sumo.trafficlight.setPhase(self.id, self.yellow_dict[(self.green_phase, new_phase)])  # turns yellow
-            self.sumo.trafficlight.setRedYellowGreenState(
-                self.id, self.all_phases[self.yellow_dict[(self.green_phase, new_phase)]].state
+            return
+        #print("----------")
+        # Ensure target phase exists in environment definition
+        if new_phase_idx_env >= len(self.all_phases) or new_phase_idx_env < 0:
+            #print(f"  ERROR: Invalid new_phase index '{new_phase_idx_env}'. Max index is {len(self.all_phases)-1}.")
+            return # Or raise error
+
+        target_phase_state_str = self.all_phases[new_phase_idx_env].state
+        #print(f"  Target Phase State String (from env definition): '{target_phase_state_str}'")
+
+        # --- 1. Get Current State from SUMO ---
+        try:
+            current_logics = self.sumo.trafficlight.getAllProgramLogics(self.id)
+            if not current_logics:
+                print(f"  ERROR: No program logics found for TL '{self.id}' in SUMO.")
+                return
+            current_logic = current_logics[0] # Assume modifying the first/default logic
+            current_sumo_phase_index = self.sumo.trafficlight.getPhase(self.id)
+            current_sumo_state_str = self.sumo.trafficlight.getRedYellowGreenState(self.id)
+            current_next_switch_time = self.sumo.trafficlight.getNextSwitch(self.id)
+
+            #print(f"\n  --- State BEFORE Modification ---")
+            #print(f"  Current SUMO Phase Index: {current_sumo_phase_index}")
+            #print(f"  Current SUMO State String: '{current_sumo_state_str}'")
+            #print(f"  Current SUMO Next Switch Time (Absolute): {current_next_switch_time}")
+            #print(f"  Current ProgramLogic '{current_logic.programID}':")
+            #for i, ph in enumerate(current_logic.phases):
+                #print(f"    Phase {i}: duration={ph.duration}, state='{ph.state}'")
+
+        except traci.TraCIException as e:
+            print(f"  ERROR: traci exception getting current state: {e}")
+            return
+        except Exception as e:
+            print(f"  ERROR: Unexpected exception getting current state: {e}")
+            return
+
+        # --- 2. Calculate New Duration for the Target Phase ---
+        # Using green_extension as the *basis* for the new duration, then clamping.
+        # RENAME variable for clarity.
+        
+        new_phase_duration = max(min(float(green_extension), float(self.max_green)), float(self.min_green))
+        #print(f"\n  --- Calculation ---")
+        #print(f"  Calculated New Duration for target state '{target_phase_state_str}': {new_phase_duration} (clamped from {green_extension})")
+
+        # --- 3. Build the Modified Phase List ---
+        modified_phases = []
+        found_target_phase_in_logic = False
+        for phase in current_logic.phases:
+            if phase.state == target_phase_state_str:
+                # Found the phase in the current SUMO logic that matches the target state string
+                found_target_phase_in_logic = True
+                #print(f"    Found matching phase in SUMO logic. Original duration: {phase.duration}. Applying new duration: {new_phase_duration}")
+                # Create a NEW Phase object with the modified duration
+                modified_phases.append(traci.trafficlight.Phase(new_phase_duration, phase.state, phase.minDur, phase.maxDur))
+            else:
+                # Keep other phases as they were in the *currently fetched* logic
+                modified_phases.append(phase)
+
+        #if not found_target_phase_in_logic:
+            #print(f"  WARNING: Target phase state '{target_phase_state_str}' not found in the current SUMO program logic phases. Cannot modify duration.")
+            # Decide how to handle this: return, raise error, or proceed without modification?
+            # Proceeding might be okay if the intention is just to switch TO this phase,
+            # but the duration change won't happen. Let's proceed but the prints show the issue.
+
+        # --- 4. Create and Apply the Modified Logic ---
+        try:
+            # Use the fetched programID, type, and currentPhaseIndex
+            modified_logic = traci.trafficlight.Logic(
+                current_logic.programID,
+                current_logic.type,
+                current_logic.currentPhaseIndex, # Keep the current index unless explicitly changing program
+                modified_phases # Use the list with the potentially modified duration
             )
-            self.green_phase = new_phase
-            self.next_action_time = self.env.sim_step + self.delta_time
-            self.is_yellow = True
-            self.time_since_last_phase_change = 0
 
+            #print(f"\n  --- Applying Modified Logic ---")
+            #print(f"  New Logic to be set (ProgramID: {modified_logic.programID}):")
+            #for i, ph in enumerate(modified_logic.phases):
+                #print(f"    Phase {i}: duration={ph.duration}, state='{ph.state}' {'<- MODIFIED' if ph.state == target_phase_state_str else ''}")
+
+            # *** THE ACTUAL COMMAND TO CHANGE SUMO'S STATE ***
+            self.sumo.trafficlight.setProgramLogic(self.id, modified_logic)
+            #print(f"  setProgramLogic called for TL '{self.id}'.")
+
+            # Introduce a very small delay IF needed, sometimes traci needs a moment
+            # time.sleep(0.01) # Usually not required, but uncomment for testing if verification fails
+
+        except traci.TraCIException as e:
+            #print(f"  ERROR: traci exception during setProgramLogic: {e}")
+            return # Stop if setting the logic failed
+        except Exception as e:
+            #print(f"  ERROR: Unexpected exception during setProgramLogic: {e}")
+            return
+
+        # --- 5. Verify the Change in SUMO (Fetch Again) ---
+        try:
+            # Immediately query SUMO again to see if the change took effect
+            time.sleep(0.01) # Brief pause MAY help ensure SUMO processes the change before query
+            newly_set_logics = self.sumo.trafficlight.getAllProgramLogics(self.id)
+            if not newly_set_logics:
+                #print(f"  VERIFICATION ERROR: No logics found after setProgramLogic call.")
+                logic_after = None
+            else:
+                logic_after = newly_set_logics[0] # Assume first logic again
+
+            new_sumo_phase_index = self.sumo.trafficlight.getPhase(self.id)
+            new_sumo_state_str = self.sumo.trafficlight.getRedYellowGreenState(self.id)
+            new_next_switch_time = self.sumo.trafficlight.getNextSwitch(self.id)
+
+            #print(f"\n  --- State AFTER Modification (Verification) ---")
+            #print(f"  Current SUMO Phase Index: {new_sumo_phase_index}")
+            #print(f"  Current SUMO State String: '{new_sumo_state_str}'")
+            #print(f"  Current SUMO Next Switch Time (Absolute): {new_next_switch_time}")
+
+            if logic_after:
+                #print(f"  Current ProgramLogic '{logic_after.programID}' in SUMO:")
+                verification_successful = False
+                for i, ph in enumerate(logic_after.phases):
+                    is_target_phase = (ph.state == target_phase_state_str)
+                    modified_marker = ""
+                    if is_target_phase:
+                        modified_marker = f"<- TARGET PHASE. Expected duration: {new_phase_duration:.2f}"
+                        # Compare floating point numbers with tolerance
+                        if abs(ph.duration - new_phase_duration) < 0.01:
+                            modified_marker += " - VERIFIED!"
+                            verification_successful = True
+                        else:
+                            modified_marker += f" - FAILED VERIFICATION! (Actual: {ph.duration:.2f})"
+
+                    #print(f"    Phase {i}: duration={ph.duration:.2f}, state='{ph.state}' {modified_marker}")
+                
+                #if not verification_successful and found_target_phase_in_logic:
+                    #print(f"  VERIFICATION FAILED: The duration for state '{target_phase_state_str}' in SUMO does not match the intended value {new_phase_duration:.2f}.")
+                #elif not found_target_phase_in_logic:
+                    #print(f"  VERIFICATION NOTE: Target phase state was not in the original logic, so no duration change was expected or verified.")
+                #else:
+                    #print(f"  VERIFICATION SUCCESSFUL: Duration change seems reflected in SUMO's program logic.")
+
+            else:
+                print(f"  Could not fetch logic after setting for verification.")
+
+        except traci.TraCIException as e:
+            print(f"  VERIFICATION ERROR: traci exception checking state after modification: {e}")
+        except Exception as e:
+            print(f"  VERIFICATION ERROR: Unexpected exception checking state after modification: {e}")
+
+
+        # --- 6. Update Internal State Variables ---
+        # Setting next_action_time based on the fixed delta_time (agent decision interval)
+        # This is usually the standard approach.
+        self.next_action_time = self.env.sim_step + self.delta_time
+        #print(f"\n  --- Updating Internal State ---")
+        #print(f"  Setting self.next_action_time = {self.env.sim_step} (current step) + {self.delta_time} (fixed delta) = {self.next_action_time}")
+
+        # Original logic for setting internal state:
+        self.green_phase = new_phase_idx_env # Track the *intended* green phase index
+        #self.time_since_last_phase_change = 0 # Reset time in phase
+
+        #print(f"  Set self.green_phase = {self.green_phase}")
+        #print(f"  Reset self.time_since_last_phase_change = {self.time_since_last_phase_change}")
+        #print(f"--- set_next_phase finished ---")
+    
+    
     def compute_observation(self):
         """Computes the observation of the traffic signal."""
         return self.observation_fn()
@@ -222,9 +383,143 @@ class TrafficSignal:
 
     def _average_speed_reward(self):
         return self.get_average_speed()
-
+    """
     def _queue_reward(self):
         return -self.get_total_queued()
+    """
+    def _initialize_approach_lanes(self):
+        """
+        Initializes a mapping from approach direction (N, S, E, W) to a list of
+        controlled lane IDs belonging to that approach.
+        Uses fixed edge names 'n_t', 's_t', 'e_t', 'w_t' as per problem context.
+        """
+        approach_lanes_map = {'N': [], 'S': [], 'E': [], 'W': []}
+        
+        # Define the exact edge IDs for N, S, E, W approaches based on problem's route examples
+        target_edge_ids_for_approaches = {
+            'N': 'n_t',
+            'S': 's_t',
+            'E': 'e_t',
+            'W': 'w_t'
+        }
+
+
+        controlled_lanes_by_this_tl = self.sumo.trafficlight.getControlledLanes(self.id)
+        if not controlled_lanes_by_this_tl:
+
+            return approach_lanes_map 
+
+
+        edge_to_controlled_lanes = {}
+        for lane_id in controlled_lanes_by_this_tl:
+            try:
+
+                if lane_id not in self.sumo.lane.getIDList():
+
+                    continue
+                edge_id = self.sumo.lane.getEdgeID(lane_id)
+                if edge_id not in edge_to_controlled_lanes:
+                    edge_to_controlled_lanes[edge_id] = []
+                edge_to_controlled_lanes[edge_id].append(lane_id)
+            except traci.TraCIException as e:
+                print(f"Warning: TraCI error getting edge ID for lane {lane_id} (TS: {self.id}): {e}. Skipping this lane.")
+                continue
+
+        for approach_name, target_edge_id in target_edge_ids_for_approaches.items():
+            if target_edge_id in edge_to_controlled_lanes:
+                # These are the lanes on the target_edge_id that are controlled by *this* TL.
+                approach_lanes_map[approach_name].extend(edge_to_controlled_lanes[target_edge_id])
+                # Sort lanes for consistent order (e.g., lane_0, lane_1)
+                approach_lanes_map[approach_name].sort()
+            # else:
+                # This is normal if this TS doesn't control lanes on 'n_t', or if 'n_t' isn't an incoming edge here.
+                # print(f"Debug: Target edge '{target_edge_id}' for approach '{approach_name}' (TS {self.id}) "
+                #       f"not found among its controlled edges or has no controlled lanes on it. "
+                #       f"Controlled edges for {self.id}: {list(edge_to_controlled_lanes.keys())}")
+        return approach_lanes_map
+        
+    ### edit - queue reduction + queue absolute 
+    def _queue_reward(self):
+        """
+        Calculates a composite reward based on queue reduction and absolute queue size.
+
+        The reward is defined as:
+        rt = α1 * R_reduction + α2 * R_absolute
+
+        Where:
+        - R_reduction: Measures the decrease in max queue lengths from the previous step.
+                    (Σ (Q_max_j,t-1 - Q_max_j,t)) / (N_approaches * Q_max_norm)
+        - R_absolute: Penalizes the current total max queue length.
+                    (-Σ Q_max_j,t) / (N_approaches * Q_max_norm)
+
+        Requires state from the previous timestep (self.last_max_queues).
+        """
+        current_max_queues_per_approach = {}
+        num_effective_approaches = 0
+        approach_order = ['N', 'S', 'E', 'W']
+
+        # Step 1: Calculate the maximum queue for each approach at the current timestep 
+        for approach_key in approach_order:
+            lanes_for_this_approach = self.approach_lanes.get(approach_key, [])
+            
+            max_queue_this_approach = 0
+            if not lanes_for_this_approach:
+                # This approach does not exist or has no controlled lanes.
+                pass
+            else:
+                num_effective_approaches += 1
+                for lane_id in lanes_for_this_approach:
+                    try:
+                        current_lane_queue = self.sumo.lane.getLastStepHaltingNumber(lane_id)
+                        if current_lane_queue > max_queue_this_approach:
+                            max_queue_this_approach = current_lane_queue
+                    except traci.TraCIException as e:
+                        print(f"Warning: Error getting queue for lane {lane_id} (TS: {self.id}, Approach: {approach_key}): {e}. Skipping this lane.")
+                        continue
+            
+            current_max_queues_per_approach[approach_key] = max_queue_this_approach
+
+        # Step 2: Calculate the two reward components.
+        # Avoid division by zero if there are no approaches with lanes.
+        if num_effective_approaches == 0:
+            self.last_max_queues = current_max_queues_per_approach
+            return 0.0
+        
+        sum_of_current_max_queues = 0.0
+        sum_of_queue_reduction = 0.0
+        
+        for approach_key in approach_order:
+            current_q = current_max_queues_per_approach.get(approach_key, 0)
+            # Retrieve the max queue from the previous step, defaulting to 0.
+            last_q = self.last_max_queues.get(approach_key, 0)
+
+            sum_of_current_max_queues += current_q
+            sum_of_queue_reduction += (last_q - current_q)
+
+        # Normalization denominator from the formula: N_approaches * Q_max
+        denominator = num_effective_approaches * self.max_queue_norm_factor
+        if denominator == 0:
+            denominator = 1.0 # Failsafe to prevent division by zero
+
+        # R_absolute: Absolute Queue Penalty. This is negative as large queues are bad.
+        r_absolute = -sum_of_current_max_queues / denominator
+
+        # R_reduction: Queue Reduction Reward. This is positive if queues have shrunk.
+        r_reduction = sum_of_queue_reduction / denominator
+        
+        # Step 3: Calculate the final weighted reward.
+        total_reward = (self.alpha_absolute * r_absolute) + (self.alpha_reduction * r_reduction)
+
+        # Step 4: Update state for the next timestep's calculation.
+        # The current queues become the 'last' queues for the next call.
+        self.last_max_queues = current_max_queues_per_approach
+
+        # For debugging:
+        # print(f"TS {self.id}: R_abs={r_absolute:.3f}, R_red={r_reduction:.3f}, Total Reward={total_reward:.3f}")
+        
+        return total_reward
+
+    
 
     def _diff_waiting_time_reward(self):
         ts_wait = sum(self.get_accumulated_waiting_time_per_lane()) / 100.0
@@ -308,12 +603,17 @@ class TrafficSignal:
 
         Obs: The queue is computed as the number of vehicles halting divided by the number of vehicles that could fit in the lane.
         """
-        lanes_queue = [
+        #lanes_queue = [
+        #    self.sumo.lane.getLastStepHaltingNumber(lane)
+        #    / (self.lanes_length[lane] / (self.MIN_GAP + self.sumo.lane.getLastStepLength(lane)))
+        #    for lane in self.lanes
+        #]
+        lanes_queue= [
             self.sumo.lane.getLastStepHaltingNumber(lane)
-            / (self.lanes_length[lane] / (self.MIN_GAP + self.sumo.lane.getLastStepLength(lane)))
             for lane in self.lanes
         ]
-        return [min(1, queue) for queue in lanes_queue]
+        #return [min(1, queue) for queue in lanes_queue]
+        return [queue for queue in lanes_queue]
 
     def get_total_queued(self) -> int:
         """Returns the total number of vehicles halting in the intersection."""
@@ -343,3 +643,5 @@ class TrafficSignal:
         "queue": _queue_reward,
         "pressure": _pressure_reward,
     }
+
+
