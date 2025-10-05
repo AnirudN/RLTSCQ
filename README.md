@@ -1,4 +1,5 @@
 # Reinforcement Learning Based Traffic Signal Design to Minimize Queue Lengths
+This is the official codebase for our paper on arXiv: [arXiv:2509.21745](https://arxiv.org/abs/2509.21745)
 
 This repository contains the code and experiments for our paper on designing traffic signal controllers using Reinforcement Learning (RL).  The framework utilizes the [SUMO (Simulation of Urban MObility)](https://github.com/eclipse/sumo) traffic simulator.
 
@@ -154,11 +155,11 @@ If you use this code in your research, please cite our paper:
 [Link to Paper](#) <!-- Replace with your actual paper link -->
 
 ```bibtex
-@inproceedings{RLTSCQ,
+@article{nandakumar2025reinforcement,
   title={Reinforcement Learning Based Traffic Signal Design to Minimize Queue Lengths},
-  author={Anirud Nandakumar, Chayan Banerjee, Lelitha Devi Vanajakshi},
-  year={2025},
-  url={https://arxiv.org/abs/PAPER_ID}
+  author={Nandakumar, Anirud and Banerjee, Chayan and Vanajakshi, Lelitha Devi},
+  journal={arXiv preprint arXiv:2509.21745},
+  year={2025}
 }
 ```
 
