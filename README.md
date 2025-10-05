@@ -152,7 +152,7 @@ python RLTSCQ/experiments/ppo_test.py --outputdir <path_to_output_directory> --m
 
 If you use this code in your research, please cite our paper:
 
-[Link to Paper](#) <!-- Replace with your actual paper link -->
+[Link to Paper](https://arxiv.org/abs/2509.21745) <!-- Replace with your actual paper link -->
 
 ```bibtex
 @article{nandakumar2025reinforcement,
